@@ -3,7 +3,7 @@ import streamlit as st
 import asyncio
 
 from astream_events_handler import invoke_our_graph  # Utility function to handle events from astream_events from graph
-
+from graph import graph
 st.title("StreamLit 🤝 LangGraph")
 
 # Session state management for expander and graph resume after interrupt
@@ -51,7 +51,7 @@ if prompt:
         shared_state = {
             "graph_resume": st.session_state.graph_resume
         }
-        response = asyncio.run(invoke_our_graph(prompt, placeholder, shared_state))
+        response = asyncio.run(invoke_our_graph(graph,prompt, placeholder, shared_state))
         st.session_state.graph_resume = False
         # Handle the response from the graph
         if type(response) is dict: # error handling
