@@ -53,6 +53,31 @@ st.markdown("""
         border-radius: 5px;
         margin: 5px 0;
     }
+    .event-message {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+        color: white;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .event-header {
+        font-weight: bold;
+        font-size: 1.1em;
+        margin-bottom: 10px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    .event-content {
+        line-height: 1.6;
+    }
+    .event-metadata {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 5px;
+        padding: 10px;
+        margin-top: 10px;
+        font-size: 0.9em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -65,6 +90,50 @@ class WorkflowState(TypedDict):
     final_result: str
     step: str
     metadata: Dict[str, Any]
+    events: List[Dict[str, Any]]
+
+def dispatch_event(event_type: str, content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Dispatch un événement personnalisé"""
+    return {
+        "type": event_type,
+        "data": {
+            "content": content,
+            "timestamp": time.time(),
+            "metadata": metadata or {}
+        }
+    }
+
+def update_workflow_events(events: List[Dict[str, Any]]):
+    """Met à jour les événements du workflow dans l'état de session"""
+    if 'events' not in st.session_state.workflow_state:
+        st.session_state.workflow_state['events'] = []
+    
+    # Add new events that aren't already present
+    for event in events:
+        event_id = f"{event['type']}_{event['data']['timestamp']}"
+        existing_events = st.session_state.workflow_state['events']
+        
+        if not any(f"{e['type']}_{e['data']['timestamp']}" == event_id for e in existing_events):
+            st.session_state.workflow_state['events'].append(event)
+
+def process_workflow_events(events: List[Dict[str, Any]]):
+    """Traite et affiche les événements du workflow en temps réel"""
+    for event in events:
+        # Add event to messages if not already present
+        event_id = f"{event['type']}_{event['data']['timestamp']}"
+        existing_events = [msg for msg in st.session_state.messages if msg.get('type') == 'event']
+        
+        if not any(f"{msg['event_type']}_{msg['timestamp']}" == event_id for msg in existing_events):
+            st.session_state.messages.append({
+                'type': 'event',
+                'event_type': event['type'],
+                'content': event['data']['content'],
+                'timestamp': event['data']['timestamp'],
+                'metadata': event['data'].get('metadata', {})
+            })
+            
+            # Force a rerun to show the event immediately
+            st.rerun()
 
 # Initialisation de l'état Streamlit
 def init_session_state():
@@ -76,7 +145,8 @@ def init_session_state():
             'interrupt_data': None,
             'workflow_completed': False,
             'execution_history': [],
-            'current_step': 'idle'
+            'current_step': 'idle',
+            'events': []
         }
     
     if 'graph' not in st.session_state:
@@ -121,11 +191,23 @@ def analyze_request_node(state: WorkflowState) -> WorkflowState:
         analysis = "Demande générale de contenu détectée"
         content_type = "general"
     
+    # Dispatch custom event
+    analysis_event = dispatch_event(
+        "analysis_completed",
+        f"🔍 **Analyse terminée**\n\n**Type de contenu détecté:** {content_type}\n**Analyse:** {analysis}",
+        {"content_type": content_type, "analysis": analysis}
+    )
+    
+    # Add event to state
+    events = state.get("events", [])
+    events.append(analysis_event)
+    
     return {
         **state,
         "analysis": analysis,
         "step": "analyzed",
-        "metadata": {**state.get("metadata", {}), "content_type": content_type}
+        "metadata": {**state.get("metadata", {}), "content_type": content_type},
+        "events": events
     }
 
 def generate_content_node(state: WorkflowState) -> WorkflowState:
@@ -156,15 +238,38 @@ def generate_content_node(state: WorkflowState) -> WorkflowState:
     except Exception as e:
         generated_content = f"Erreur de génération: {str(e)}\n\nContenu de secours généré localement."
     
+    # Dispatch custom event
+    generation_event = dispatch_event(
+        "content_generated",
+        f"🤖 **Contenu généré**\n\n**Type:** {content_type}\n\n**Contenu:**\n{generated_content[:500]}{'...' if len(generated_content) > 500 else ''}",
+        {"content_type": content_type, "content_length": len(generated_content)}
+    )
+    
+    # Add event to state
+    events = state.get("events", [])
+    events.append(generation_event)
+    
     return {
         **state,
         "generated_content": generated_content,
-        "step": "generated"
+        "step": "generated",
+        "events": events
     }
 
 def human_review_node(state: WorkflowState) -> WorkflowState:
     """Nœud d'interruption pour révision humaine"""
     print("👤 Interruption pour révision humaine...")
+    
+    # Dispatch custom event for human review request
+    review_event = dispatch_event(
+        "human_review_requested",
+        f"👤 **Révision humaine requise**\n\n**Demande:** {state['user_request']}\n**Type de contenu:** {state['metadata'].get('content_type', 'general')}\n\nLe contenu généré attend votre validation et modification si nécessaire.",
+        {"content_type": state["metadata"].get("content_type", "general")}
+    )
+    
+    # Add event to state
+    events = state.get("events", [])
+    events.append(review_event)
     
     # Créer les données d'interruption
     interrupt_payload = {
@@ -184,7 +289,8 @@ def human_review_node(state: WorkflowState) -> WorkflowState:
         **state,
         "human_feedback": result.get("human_feedback", ""),
         "generated_content": result.get("edited_content", state["generated_content"]),
-        "step": "reviewed"
+        "step": "reviewed",
+        "events": events
     }
 
 def finalize_content_node(state: WorkflowState) -> WorkflowState:
@@ -197,10 +303,22 @@ def finalize_content_node(state: WorkflowState) -> WorkflowState:
     if state.get("human_feedback"):
         final_result += f"\n\n--- Commentaires de révision ---\n{state['human_feedback']}"
     
+    # Dispatch custom event for finalization
+    finalization_event = dispatch_event(
+        "content_finalized",
+        f"✅ **Contenu finalisé**\n\n**Demande originale:** {state['user_request']}\n**Feedback humain:** {'Oui' if state.get('human_feedback') else 'Non'}\n\nLe workflow est terminé avec succès !",
+        {"has_feedback": bool(state.get("human_feedback")), "final_length": len(final_result)}
+    )
+    
+    # Add event to state
+    events = state.get("events", [])
+    events.append(finalization_event)
+    
     return {
         **state,
         "final_result": final_result,
-        "step": "finalized"
+        "step": "finalized",
+        "events": events
     }
 
 # Construction du graphe LangGraph
@@ -252,6 +370,44 @@ def main():
         
         st.markdown("---")
         
+        # Panel des événements
+        st.subheader("📊 Événements du Workflow")
+        events = st.session_state.workflow_state.get('events', [])
+        
+        if events:
+            for i, event in enumerate(events[-5:]):  # Show last 5 events
+                event_type = event.get('type', 'unknown')
+                timestamp = event.get('data', {}).get('timestamp', 0)
+                time_str = time.strftime('%H:%M:%S', time.localtime(timestamp))
+                
+                # Color coding for different event types
+                if 'analysis' in event_type:
+                    icon = "🔍"
+                    color = "success"
+                elif 'generated' in event_type:
+                    icon = "🤖"
+                    color = "info"
+                elif 'review' in event_type:
+                    icon = "👤"
+                    color = "warning"
+                elif 'finalized' in event_type:
+                    icon = "✅"
+                    color = "success"
+                else:
+                    icon = "📋"
+                    color = "info"
+                
+                st.markdown(f"""
+                <div class="status-{color}">
+                    {icon} {event_type.replace('_', ' ').title()}
+                    <br><small>{time_str}</small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("Aucun événement pour le moment")
+        
+        st.markdown("---")
+        
         # Bouton reset
         if st.button("🔄 Nouveau Workflow", use_container_width=True):
             reset_workflow()
@@ -262,7 +418,8 @@ def main():
                 "thread_id": st.session_state.workflow_state.get('current_thread_id'),
                 "interrupted": st.session_state.workflow_state.get('interrupted', False),
                 "completed": st.session_state.workflow_state.get('workflow_completed', False),
-                "current_step": st.session_state.workflow_state.get('current_step', 'idle')
+                "current_step": st.session_state.workflow_state.get('current_step', 'idle'),
+                "events_count": len(events)
             })
     
     # Interface principale
@@ -270,6 +427,29 @@ def main():
     
     with col1:
         st.header("💬 Interface Utilisateur")
+        
+        # Progress indicator for workflow steps
+        if st.session_state.workflow_state['current_step'] != 'idle':
+            st.subheader("📈 Progression du Workflow")
+            
+            steps = ['start', 'analyzed', 'generated', 'reviewed', 'finalized']
+            current_step = st.session_state.workflow_state['current_step']
+            
+            if current_step in steps:
+                current_index = steps.index(current_step)
+                progress = (current_index + 1) / len(steps)
+                
+                st.progress(progress)
+                
+                # Show step labels
+                cols = st.columns(len(steps))
+                for i, step in enumerate(steps):
+                    with cols[i]:
+                        if i <= current_index:
+                            st.markdown(f"✅ {step.title()}")
+                        else:
+                            st.markdown(f"⏳ {step.title()}")
+        
         render_main_interface()
     
     with col2:
@@ -287,6 +467,19 @@ def render_main_interface():
             st.chat_message("assistant").write(msg['content'])
         elif msg['type'] == 'system':
             st.info(f"🔄 {msg['content']}")
+        elif msg['type'] == 'event':
+            # Display custom events with special styling
+            st.markdown(f"""
+            <div class="event-message">
+                <div class="event-header">🎯 {msg['event_type'].replace('_', ' ').title()}</div>
+                <div class="event-content">{msg['content']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show metadata in an expander
+            if msg.get('metadata'):
+                with st.expander("📊 Métadonnées de l'événement"):
+                    st.json(msg['metadata'])
     
     # Interface de saisie
     if not st.session_state.workflow_state.get('interrupted', False):
@@ -403,7 +596,8 @@ def handle_user_request(user_input: str):
         "human_feedback": "",
         "final_result": "",
         "step": "start",
-        "metadata": {}
+        "metadata": {},
+        "events": []
     }
     
     # Configuration du thread
@@ -413,6 +607,21 @@ def handle_user_request(user_input: str):
         # Exécuter jusqu'à l'interruption
         with st.spinner("🔄 Traitement en cours..."):
             result = st.session_state.graph.invoke(initial_state, config=config)
+        
+        # Process events and add them to messages
+        if "events" in result:
+            # Update workflow state events
+            update_workflow_events(result["events"])
+            
+            # Add events to messages
+            for event in result["events"]:
+                st.session_state.messages.append({
+                    'type': 'event',
+                    'event_type': event['type'],
+                    'content': event['data']['content'],
+                    'timestamp': event['data']['timestamp'],
+                    'metadata': event['data'].get('metadata', {})
+                })
         
         # Vérifier s'il y a une interruption
         if "__interrupt__" in result:
@@ -455,6 +664,21 @@ def resume_workflow(edited_content: str, human_feedback: str = ""):
                 config=config
             )
         
+        # Process events from resumed workflow
+        if "events" in final_result:
+            # Update workflow state events
+            update_workflow_events(final_result["events"])
+            
+            # Add events to messages
+            for event in final_result["events"]:
+                st.session_state.messages.append({
+                    'type': 'event',
+                    'event_type': event['type'],
+                    'content': event['data']['content'],
+                    'timestamp': event['data']['timestamp'],
+                    'metadata': event['data'].get('metadata', {})
+                })
+        
         complete_workflow(final_result, human_feedback)
     
     except Exception as e:
@@ -475,6 +699,24 @@ def complete_workflow(result: Dict[str, Any], feedback: str = ""):
     """Termine le workflow avec succès"""
     
     final_content = result.get("final_result", "Contenu non disponible")
+    
+    # Process any remaining events from the final result
+    if "events" in result:
+        # Update workflow state events
+        update_workflow_events(result["events"])
+        
+        for event in result["events"]:
+            # Only add events that haven't been processed yet
+            event_id = f"{event['type']}_{event['data']['timestamp']}"
+            existing_events = [msg for msg in st.session_state.messages if msg.get('type') == 'event']
+            if not any(f"{msg['event_type']}_{msg['timestamp']}" == event_id for msg in existing_events):
+                st.session_state.messages.append({
+                    'type': 'event',
+                    'event_type': event['type'],
+                    'content': event['data']['content'],
+                    'timestamp': event['data']['timestamp'],
+                    'metadata': event['data'].get('metadata', {})
+                })
     
     # Ajouter le résultat final
     st.session_state.messages.append({
@@ -527,7 +769,8 @@ def reset_workflow():
         'interrupt_data': None,
         'workflow_completed': False,
         'execution_history': st.session_state.workflow_state.get('execution_history', []),
-        'current_step': 'idle'
+        'current_step': 'idle',
+        'events': []
     }
     st.session_state.messages = []
     st.rerun()
