@@ -1,161 +1,120 @@
-def invoke_test_our_graph(initial_state, streamlit_component, thread_id):
-    container = streamlit_component
+async def invoke_graph(st_messages, st_placeholder, st_state, thread_id):
+    print("graaph invokeeeed")
+    events = []
+    container = st_placeholder
     thread_config = {"configurable": {"thread_id": thread_id}}
+    
+    if st_state.get("graph_resume"):
+        graph.update_state(thread_config, {"input": st_messages})
+        st_input = None  # No new input is passed if resuming the graph
+    
+    # Invoke the graph as normal but depending on if the input is 'None'
+    async for event in graph.astream_events(st_messages, thread_config, version="v1"):
+        name = event["name"]
+        events.append(event)
+        
+        if isinstance(event["data"], dict):
+            chunk = event["data"].get("chunk")
+            if name == "LangGraph" and chunk and chunk.get("__interrupt__"):
+                interrupt_data = chunk.get("__interrupt__")[-1].value
+                print("+" * 50)
+                print(interrupt_data)
+                print("+" * 50)
+                
+                if interrupt_data:
+                    st.session_state.interrupt_data = interrupt_data
+                    st.session_state.is_processing = False
+                    # Don't call st.rerun() here - let the UI render first
+                    return  # Exit the function to allow UI interaction
+        
+        data = str(event["data"])
+        if name in ("EVENT_START_LLM", "EVENT_SAVE_CODE", "EVENT_RUN_CODE", "EVENT_AI_MESSAGE"):
+            container.info(data)
+        
+        if name == "EVENT_RECEIVE_RESPONSE_LLM":
+            container.markdown(data)
+        if name == "EVENT_ERROR_CODE":
+            container.error(data)
+        if name == "EVENT_ASK_TO_WAIT":
+            container.write(data)
+        if name in ("EVENT_CORRECT_CODE", "EVENT_END_GRAPH"):
+            container.success(data, icon="✅")
+        
+        if name == "EVENT_WORKING_OUTPUT":
+            container.markdown(data)
 
-    # MINIMAL FIX: Add these 3 lines to prevent restarting the graph
-    if 'graph_started' not in st.session_state:
-        st.session_state.graph_started = False
-    if 'interrupt_event' not in st.session_state:
-        st.session_state.interrupt_event = None
-
-    # Only start the graph if we haven't started it yet
-    if not st.session_state.graph_started:
-        st.session_state.graph_started = True
-
-        # Invoke the graph as normal but depending on if the input is 'Won
-        for event in graph.stream(initial_state, thread_config):
-            if "__interrupt__" in event:
-                # Save the interrupt event and stop
-                st.session_state.interrupt_event = event
-                st.rerun()  # Refresh to show the UI
-                return  # Exit the function
-
-        # If no interrupt, the graph completed normally
-        return
-
-    # Handle the interrupt (this runs after the rerun)
-    if st.session_state.interrupt_event:
-        event = st.session_state.interrupt_event
-        print(f"Resume event: {event}")
-
-        # Handle nested interrupt for human review
-        if "__interrupt__" in event:
-            nested_interrupt = event["__interrupt__"]
-            if "task" in nested_interrupt:
-                print(nested_interrupt["task"])
-
-                # MINIMAL FIX: Use a form to prevent auto-rerun on typing
-                with st.form("review_form"):
-                    edited_content = st.text_area(
-                        "Éditez le contenu si nécessaire:",
-                        value="generated_content",  # Replace with your actual content
-                        height=300,
-                        key="content_editor"
-                    )
-
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        approve_button = st.form_submit_button("✅ Approuver", use_container_width=True)
-
-                    with col2:
-                        reject_button = st.form_submit_button("❌ Rejeter", use_container_width=True)
-
-                # Handle button clicks
-                if approve_button:
-                    user_response = "yes"
-                    print(f"Resuming with decision: {user_response}")
-
-                    for resume_event in graph.stream(
-                            Command(resume=user_response),
-                            config=thread_config
-                    ):
-                        print(f"Final event: {resume_event}")
-                        container.success("✅ Processus terminé!")
-                        container.json(resume_event)  # Show the final result
-
-                        # Reset for next run
-                        st.session_state.graph_started = False
-                        st.session_state.interrupt_event = None
-                        break
-
-                elif reject_button:
-                    user_response = "no"
-                    print(f"Resuming with decision: {user_response}")
-
-                    for resume_event in graph.stream(
-                            Command(resume=user_response),
-                            config=thread_config
-                    ):
-                        print(f"Final event: {resume_event}")
-                        container.success("✅ Processus terminé!")
-                        container.json(resume_event)
-
-                        # Reset for next run
-                        st.session_state.graph_started = False
-                        st.session_state.interrupt_event = None
-                        break
-        else:
-            # Handle other types of events
-            name = str(event)
-            print(f"Other event: {name}")
-
-
-# ALTERNATIVE: Even more minimal fix - just wrap the text area in a form
-def invoke_test_our_graph_minimal(initial_state, streamlit_component, thread_id):
-    container = streamlit_component
-    thread_config = {"configurable": {"thread_id": thread_id}}
-
-    # SUPER MINIMAL: Just add this check
-    if 'in_review' not in st.session_state:
-        st.session_state.in_review = False
-
-    if not st.session_state.in_review:
-        # Invoke the graph as normal
-        for event in graph.stream(initial_state, thread_config):
-            if "__interrupt__" in event:
-                # Store event and mark as in review
-                st.session_state.review_event = event
-                st.session_state.in_review = True
+# In your main app logic:
+def main():
+    # Your existing setup code...
+    user_uid = st.context.headers.get("Domino-Username", "default_user")
+    
+    initial_state = {
+        "sas_input_code": st.session_state.sas_file_content,
+        "sas_input_data": st.session_state.input_sample,
+        "sas_output_data": st.session_state.output_sample,
+        "max_retry": st.session_state.max_retry,
+        "use_case_dir_name": st.session_state.use_case_dir_name,
+        "user_uid": user_uid,
+        "execute_the_code": st.session_state.execute_code
+    }
+    
+    placeholder = st.container()
+    shared_state = {"graph_resume": st.session_state.workflow_resume}
+    
+    # Check if we have interrupt data and user hasn't made a choice yet
+    if st.session_state.interrupt_data and not st.session_state.get("user_choice_made", False):
+        st.write("**Workflow paused for user input:**")
+        st.write(st.session_state.interrupt_data.get("message", "Please make a choice:"))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Continue", key="continue_btn"):
+                # Update the graph state with user's choice
+                thread_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                graph.update_state(thread_config, {"user_choice": "continue"})
+                
+                # Clear interrupt data and mark choice as made
+                st.session_state.interrupt_data = None
+                st.session_state.user_choice_made = True
+                st.session_state.graph_resume = True
+                st.session_state.is_processing = True
                 st.rerun()
-                return
-        return
+        
+        with col2:
+            if st.button("Stop", key="stop_btn"):
+                # Update the graph state with user's choice
+                thread_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                graph.update_state(thread_config, {"user_choice": "stop"})
+                
+                # Clear interrupt data and mark choice as made
+                st.session_state.interrupt_data = None
+                st.session_state.user_choice_made = True
+                st.session_state.is_processing = False
+                st.rerun()
+    
+    elif not st.session_state.is_processing:
+        # Show the "Recommencer" button when not processing
+        if st.button("🔄 Recommencer", use_container_width=True):
+            # Reset workflow state
+            for key in ['workflow_step', 'selected_use_case', 'sas_code_step',
+                       'sas_file_name', 'input_file_content', 'input_file_name',
+                       'has_input_file', 'workflow_status']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+    
+    else:
+        # Only run the graph if we're processing and don't have pending interrupt
+        with st.spinner("🔄 Workflow is running..."):
+            asyncio.run(invoke_graph(initial_state, placeholder, shared_state, 
+                                   thread_id=st.session_state.thread_id))
 
-    # We're in review mode
-    event = st.session_state.review_event
-    nested_interrupt = event["__interrupt__"]
-
-    if "task" in nested_interrupt:
-        print(nested_interrupt["task"])
-
-        # ONLY CHANGE: Wrap in form
-        with st.form("content_form"):
-            edited_content = st.text_area(
-                "Éditez le contenu si nécessaire:",
-                value="generated_content",
-                height=300,
-                key="content_editor"
-            )
-
-            edited_content = edited_content.strip()
-            col1, col2 = st.columns(2)
-
-            with col1:
-                if st.form_submit_button("✅ Approuver", use_container_width=True):
-                    # Resume and complete
-                    for final_event in graph.stream(
-                            Command(resume="yes"),
-                            config=thread_config
-                    ):
-                        print(f"Final event: {final_event}")
-                        container.success(final_event)
-
-                        # Reset
-                        st.session_state.in_review = False
-                        del st.session_state.review_event
-                        st.rerun()
-
-            with col2:
-                if st.form_submit_button("❌ Rejeter", use_container_width=True):
-                    # Resume and complete
-                    for final_event in graph.stream(
-                            Command(resume="no"),
-                            config=thread_config
-                    ):
-                        print(f"Final event: {final_event}")
-                        container.success(final_event)
-
-                        # Reset
-                        st.session_state.in_review = False
-                        del st.session_state.review_event
-                        st.rerun()
+# Initialize session state variables
+if "interrupt_data" not in st.session_state:
+    st.session_state.interrupt_data = None
+if "user_choice_made" not in st.session_state:
+    st.session_state.user_choice_made = False
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
+if "graph_resume" not in st.session_state:
+    st.session_state.graph_resume = False
